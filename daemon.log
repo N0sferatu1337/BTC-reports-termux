@@ -26,3 +26,10 @@
 2026-11-15 17:34:25,964 [INFO] CryptoCollector: Kraken XBTEUR: €58,672.00 | RSI(1h): 45.3
 2026-11-15 17:34:25,973 [INFO] CryptoCollector: Multi-Timeframe Report geschrieben: crypto_report_2026-11-15_17-34-25.md
 2026-11-15 17:34:25,973 [INFO] CryptoCollector: Starte Git-Sync...
+2026-11-15 17:34:28,607 [INFO] CryptoCollector: Git-Sync erfolgreich.
+2026-11-15 17:34:28,607 [INFO] CryptoCollector: === Zyklus beendet ===
+2026-11-15 17:36:05,246 [INFO] CryptoCollector: === Starte Datenerfassung (inkl. Volumen & Orderbook) ===
+2026-11-15 17:36:06,085 [INFO] CryptoCollector: Coinbase BTC-EUR: €58,690.17 | Vol: 845.13 BTC | Spread: €5.53
+2026-11-15 17:36:06,734 [INFO] CryptoCollector: Kraken XBTEUR: €58,661.00 | Vol: 1,277.14 BTC | Spread: €11.90
+2026-11-15 17:36:06,746 [INFO] CryptoCollector: Report mit Volumen & Orderbook geschrieben: crypto_report_2026-11-15_17-36-06.md
+2026-11-15 17:36:06,746 [INFO] CryptoCollector: Starte Git-Sync...

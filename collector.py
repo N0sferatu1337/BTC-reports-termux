@@ -1,3 +1,4 @@
+#!/usr/init/env python3
 #!/usr/bin/env python3
 import argparse, logging, sys, subprocess, math
 from datetime import datetime
@@ -34,47 +35,43 @@ def calculate_rsi(prices: List[float], period: int = 14) -> float:
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def calculate_bollinger_bands(prices: List[float], period: int = 20, num_std: float = 2.0):
-    if len(prices) < period:
-        p = prices[-1] if prices else 0.0
-        return p, p, p
-    window = prices[-period:]
-    sma = sum(window) / period
-    variance = sum((x - sma) ** 2 for x in window) / period
-    std_dev = math.sqrt(variance)
-    return sma + (num_std * std_dev), sma, sma - (num_std * std_dev)
-
 class CoinbaseClient:
     def fetch_data(self) -> Optional[Dict[str, Any]]:
         try:
+            # 1. Spot & Stats (Volumen)
             res_spot = requests.get("https://api.coinbase.com/v2/prices/BTC-EUR/spot", timeout=10)
-            res_spot.raise_for_status()
             spot = float(res_spot.json()["data"]["amount"])
             
-            # Multi-Timeframe Granularities in Sekunden: 900 (15m), 3600 (1h), 21600 (6h)
-            timeframes = {"15m": 900, "1h": 3600, "6h": 21600}
-            tf_data = {}
+            res_stats = requests.get("https://api.exchange.coinbase.com/products/BTC-EUR/stats", timeout=10)
+            vol_24h = float(res_stats.json().get("volume", 0.0)) if res_stats.status_code == 200 else 0.0
 
-            for tf, gran in timeframes.items():
-                res = requests.get(f"https://api.exchange.coinbase.com/products/BTC-EUR/candles?granularity={gran}", timeout=10)
-                closes = []
-                if res.status_code == 200:
-                    raw = res.json()
-                    closes = [c[4] for c in sorted(raw, key=lambda x: x[0])]
-                if not closes: closes = [spot]
-                
-                tf_data[tf] = {
-                    "rsi": calculate_rsi(closes),
-                    "ema9": calculate_ema(closes, 9),
-                    "ema21": calculate_ema(closes, 21)
-                }
+            # 2. Orderbook (Top 50 Bids/Asks für Tiefe & Spread)
+            res_book = requests.get("https://api.exchange.coinbase.com/products/BTC-EUR/book?level=2", timeout=10)
+            bid_vol, ask_vol, spread = 0.0, 0.0, 0.0
+            if res_book.status_code == 200:
+                book = res_book.json()
+                bids = book.get("bids", [])[:10] # Top 10 Bids [price, size, num-orders]
+                asks = book.get("asks", [])[:10] # Top 10 Asks
+                bid_vol = sum(float(b[1]) for b in bids)
+                ask_vol = sum(float(a[1]) for a in asks)
+                if bids and asks:
+                    best_bid = float(bids[0][0])
+                    best_ask = float(asks[0][0])
+                    spread = best_ask - best_bid
 
-            upper, middle, lower = calculate_bollinger_bands([spot])
-            logger.info(f"Coinbase BTC-EUR: €{spot:,.2f} | RSI(1h): {tf_data['1h']['rsi']:.1f}")
+            # 3. Kerzen & Indikatoren (1h)
+            res_candles = requests.get("https://api.exchange.coinbase.com/products/BTC-EUR/candles?granularity=3600", timeout=10)
+            closes = [c[4] for c in sorted(res_candles.json(), key=lambda x: x[0])] if res_candles.status_code == 200 else [spot]
+
+            rsi = calculate_rsi(closes)
+            ema9 = calculate_ema(closes, 9)
+            ema21 = calculate_ema(closes, 21)
+
+            logger.info(f"Coinbase BTC-EUR: €{spot:,.2f} | Vol: {vol_24h:,.2f} BTC | Spread: €{spread:.2f}")
             return {
                 "exchange": "Coinbase", "pair": "BTC-EUR", "price": spot,
-                "timeframes": tf_data,
-                "bb_upper": upper, "bb_middle": middle, "bb_lower": lower,
+                "volume_24h": vol_24h, "spread": spread, "bid_vol": bid_vol, "ask_vol": ask_vol,
+                "rsi": rsi, "ema9": ema9, "ema21": ema21,
                 "timestamp": datetime.utcnow().isoformat()
             }
         except Exception as e:
@@ -84,37 +81,45 @@ class CoinbaseClient:
 class KrakenClient:
     def fetch_data(self) -> Optional[Dict[str, Any]]:
         try:
+            # 1. Ticker (Preis & 24h Volumen)
             res = requests.get("https://api.kraken.com/0/public/Ticker?pair=XBTEUR", timeout=10)
-            res.raise_for_status()
             d = res.json()["result"]
             k = list(d.keys())[0]
             spot = float(d[k]["c"][0])
-            
-            # Kraken Intervals in Minuten: 15 (15m), 60 (1h), 240 (4h)
-            intervals = {"15m": 15, "1h": 60, "4h": 240}
-            tf_data = {}
+            vol_24h = float(d[k]["v"][1]) # 24h Volumen [today, 24h]
 
-            for tf, interval in intervals.items():
-                res_ohlc = requests.get(f"https://api.kraken.com/0/public/OHLC?pair=XBTEUR&interval={interval}", timeout=10)
-                closes = []
-                if res_ohlc.status_code == 200:
-                    ohlc_json = res_ohlc.json()["result"]
-                    pair_key = [x for x in ohlc_json.keys() if x != "last"][0]
-                    closes = [float(c[4]) for c in ohlc_json[pair_key]]
-                if not closes: closes = [spot]
+            # 2. Orderbook / Depth
+            res_depth = requests.get("https://api.kraken.com/0/public/Depth?pair=XBTEUR&count=10", timeout=10)
+            bid_vol, ask_vol, spread = 0.0, 0.0, 0.0
+            if res_depth.status_code == 200:
+                depth_data = res_depth.json()["result"][k]
+                bids = depth_data.get("bids", [])
+                asks = depth_data.get("asks", [])
+                bid_vol = sum(float(b[1]) for b in bids)
+                ask_vol = sum(float(a[1]) for a in asks)
+                if bids and asks:
+                    best_bid = float(bids[0][0])
+                    best_ask = float(asks[0][0])
+                    spread = best_ask - best_bid
 
-                tf_data[tf] = {
-                    "rsi": calculate_rsi(closes),
-                    "ema9": calculate_ema(closes, 9),
-                    "ema21": calculate_ema(closes, 21)
-                }
+            # 3. OHLC / Kerzen (1h)
+            res_ohlc = requests.get("https://api.kraken.com/0/public/OHLC?pair=XBTEUR&interval=60", timeout=10)
+            closes = []
+            if res_ohlc.status_code == 200:
+                ohlc_json = res_ohlc.json()["result"]
+                pair_key = [x for x in ohlc_json.keys() if x != "last"][0]
+                closes = [float(c[4]) for c in ohlc_json[pair_key]]
+            if not closes: closes = [spot]
 
-            upper, middle, lower = calculate_bollinger_bands([spot])
-            logger.info(f"Kraken XBTEUR: €{spot:,.2f} | RSI(1h): {tf_data['1h']['rsi']:.1f}")
+            rsi = calculate_rsi(closes)
+            ema9 = calculate_ema(closes, 9)
+            ema21 = calculate_ema(closes, 21)
+
+            logger.info(f"Kraken XBTEUR: €{spot:,.2f} | Vol: {vol_24h:,.2f} BTC | Spread: €{spread:.2f}")
             return {
                 "exchange": "Kraken", "pair": "BTC-EUR", "price": spot,
-                "timeframes": tf_data,
-                "bb_upper": upper, "bb_middle": middle, "bb_lower": lower,
+                "volume_24h": vol_24h, "spread": spread, "bid_vol": bid_vol, "ask_vol": ask_vol,
+                "rsi": rsi, "ema9": ema9, "ema21": ema21,
                 "timestamp": datetime.utcnow().isoformat()
             }
         except Exception as e:
@@ -125,22 +130,19 @@ def generate_report(market_data):
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     path = REPORTS_DIR / f"crypto_report_{ts}.md"
     content = f"# Crypto Market Report ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n\n"
-    content += "## 📊 Multi-Timeframe Kerzen & Indikatoren-Analyse (BTC-EUR)\n\n"
+    content += "## 📊 Marktübersicht, Volumen & Orderbuch-Tiefe (BTC-EUR)\n\n"
+    content += "| Exchange | Preis (EUR) | 24h Volumen | Spread | Orderbook Druck (Bid / Ask) | RSI (1h) | Trend |\n"
+    content += "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
     
     for item in market_data:
         if item:
-            content += f"### 🏛️ {item['exchange']} (Spot: **€{item['price']:,.2f}**)\n"
-            content += "| Timeframe | RSI (14) | EMA 9 | EMA 21 | Trend-Tendenz |\n"
-            content += "| :--- | :--- | :--- | :--- | :--- |\n"
-            for tf, vals in item['timeframes'].items():
-                trend = "🟢 Bullisch (EMA9 > EMA21)" if vals['ema9'] > vals['ema21'] else "🔴 Bärisch (EMA9 < EMA21)"
-                rsi_state = "🔥 Überkauft" if vals['rsi'] > 70 else ("❄️ Überverkauft" if vals['rsi'] < 30 else "⚖️ Neutral")
-                content += f"| **{tf}** | {vals['rsi']:.1f} ({rsi_state}) | €{vals['ema9']:,.2f} | €{vals['ema21']:,.2f} | {trend} |\n"
-            content += "\n"
+            pressure = "🟢 Käufer" if item['bid_vol'] > item['ask_vol'] else "🔴 Verkäufer"
+            trend = "Bullisch" if item['ema9'] > item['ema21'] else "Bärisch"
+            content += f"| **{item['exchange']}** | **€{item['price']:,.2f}** | {item['volume_24h']:,.2f} BTC | €{item['spread']:.2f} | {pressure} ({item['bid_vol']:.1f}/{item['ask_vol']:.1f}) | {item['rsi']:.1f} | {trend} |\n"
 
-    content += "---\n*Generiert via `collector.py` auf Android/Termux mit vollständigen Multi-Timeframe Kerzen-Daten.*\n"
+    content += "\n---\n*Generiert via `collector.py` auf Android/Termux mit Volumen- und Orderbuch-Daten.*\n"
     path.write_text(content, encoding="utf-8")
-    logger.info(f"Multi-Timeframe Report geschrieben: {path.name}")
+    logger.info(f"Report mit Volumen & Orderbook geschrieben: {path.name}")
     return path
 
 def trigger_git_sync():
@@ -167,7 +169,7 @@ def main():
     args = parser.parse_args()
     if args.verbose:
         logger.setLevel(logging.DEBUG)
-    logger.info("=== Starte Multi-Timeframe Datenerfassung ===")
+    logger.info("=== Starte Datenerfassung (inkl. Volumen & Orderbook) ===")
     results = [c.fetch_data() for c in [CoinbaseClient(), KrakenClient()]]
     results = [r for r in results if r]
     if not results:
