@@ -2,6 +2,7 @@ import requests
 import math
 
 def calculate_ema(prices, period):
+    """Berechnet den Exponential Moving Average (EMA)."""
     if not prices or len(prices) < period:
         return prices[-1] if prices else 0.0
     multiplier = 2 / (period + 1)
@@ -11,6 +12,7 @@ def calculate_ema(prices, period):
     return ema
 
 def calculate_rsi(prices, period=14):
+    """Berechnet den Relative Strength Index (RSI)."""
     if len(prices) < period + 1:
         return 50.0
     gains = []
@@ -38,6 +40,7 @@ def calculate_rsi(prices, period=14):
     return rsi
 
 def calculate_bollinger_bands(prices, period=20, num_std_dev=2):
+    """Berechnet die Bollinger Bänder (Upper, Lower)."""
     if len(prices) < period:
         current = prices[-1] if prices else 0.0
         return current, current
@@ -112,25 +115,25 @@ def fetch_kraken_depth(current_price, pct=0.01):
         print(f"Fehler Kraken Orderbook: {e}")
     return {"bid_depth": 0.0, "ask_depth": 0.0}
 
-def fetch_binance_derivatives():
-    """Ruft Open Interest und Funding Rate von der Binance Futures API ab."""
+def fetch_kraken_derivatives():
+    """Ruft Open Interest und Funding Rate von der Kraken Futures API ab (stabil in DE ohne Geo-Blocking)."""
     try:
-        oi_url = "https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT"
-        premium_url = "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT"
-        
-        oi_resp = requests.get(oi_url, timeout=10).json()
-        prem_resp = requests.get(premium_url, timeout=10).json()
-        
-        open_interest = float(oi_resp.get("openInterest", 0))
-        funding_rate = float(prem_resp.get("lastFundingRate", 0)) * 100  # In Prozent
-        mark_price = float(prem_resp.get("markPrice", 0))
-        
-        return {
-            "open_interest": open_interest,
-            "funding_rate": round(funding_rate, 4),
-            "mark_price": mark_price
-        }
+        url = "https://futures.kraken.com/derivatives/api/v3/tickers"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            tickers = data.get("tickers", [])
+            for ticker in tickers:
+                if ticker.get("symbol") in ["pi_xbteur", "PI_XBTEUR"]:
+                    open_interest = float(ticker.get("openInterest", 0))
+                    funding_rate = float(ticker.get("fundingRate", 0)) * 100  # In Prozent
+                    mark_price = float(ticker.get("markPrice", 0))
+                    return {
+                        "open_interest": open_interest,
+                        "funding_rate": round(funding_rate, 4),
+                        "mark_price": mark_price
+                    }
     except Exception as e:
-        print(f"Fehler bei Binance Futures Derivate-Daten: {e}")
+        print(f"Fehler bei Kraken Futures Derivate-Daten: {e}")
     return {"open_interest": 0.0, "funding_rate": 0.0, "mark_price": 0.0}
     
