@@ -1,21 +1,20 @@
-import logging
-import sys
-from pathlib import Path
+import os
 
-BASE_DIR = Path(__file__).resolve().parent
-LOG_FILE = BASE_DIR / "daemon.log"
-REPORTS_DIR = BASE_DIR / "reports"
-REPORTS_DIR.mkdir(exist_ok=True)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+REPORTS_DIR = os.path.join(BASE_DIR, "reports")
 
-def setup_logging(verbose: bool = False) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.FileHandler(LOG_FILE, encoding="utf-8"),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
+# Coinbase Settings
+CB_PAIR = "BTC-EUR"
+CB_CANDLE_GRANULARITIES = {
+    "15m": 900,
+    "1h": 3600,
+    "6h": 21600
+}
 
-logger = logging.getLogger("CryptoCollector")
+# Kraken Settings
+KR_PAIR = "XXBTZEUR"
+KR_INTERVALS = {
+    "15m": 15,
+    "1h": 60,
+    "4h": 240
+}
