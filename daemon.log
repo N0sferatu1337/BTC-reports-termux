@@ -7,3 +7,8 @@
 2026-11-15 17:19:24,842 [INFO] CryptoCollector: Kraken XBTEUR Spot erfolgreich abgerufen: €58,660.00
 2026-11-15 17:19:24,845 [INFO] CryptoCollector: Markdown-Report erfolgreich geschrieben: crypto_report_2026-11-15_17-19-24.md
 2026-11-15 17:19:24,845 [INFO] CryptoCollector: === Zyklus erfolgreich beendet ===
+2026-11-15 17:25:54,221 [INFO] CryptoCollector: === Starte Datenerfassung ===
+2026-11-15 17:25:54,411 [INFO] CryptoCollector: Coinbase BTC-EUR: €58,576.94
+2026-11-15 17:25:54,644 [INFO] CryptoCollector: Kraken XBTEUR: €58,558.10
+2026-11-15 17:25:54,648 [INFO] CryptoCollector: Report geschrieben: crypto_report_2026-11-15_17-25-54.md
+2026-11-15 17:25:54,649 [INFO] CryptoCollector: Starte Git-Sync...
