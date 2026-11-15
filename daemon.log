@@ -1,0 +1,9 @@
+2026-11-15 17:19:24,310 [INFO] CryptoCollector: === Starte neuen Datenerfassungs-Zyklus ===
+2026-11-15 17:19:24,312 [DEBUG] urllib3.connectionpool: Starting new HTTPS connection (1): api.coinbase.com:443
+2026-11-15 17:19:24,579 [DEBUG] urllib3.connectionpool: https://api.coinbase.com:443 "GET /v2/prices/BTC-EUR/spot HTTP/1.1" 200 None
+2026-11-15 17:19:24,581 [INFO] CryptoCollector: Coinbase BTC-EUR Spot erfolgreich abgerufen: €58,626.35
+2026-11-15 17:19:24,584 [DEBUG] urllib3.connectionpool: Starting new HTTPS connection (1): api.kraken.com:443
+2026-11-15 17:19:24,840 [DEBUG] urllib3.connectionpool: https://api.kraken.com:443 "GET /0/public/Ticker?pair=XBTEUR HTTP/1.1" 200 None
+2026-11-15 17:19:24,842 [INFO] CryptoCollector: Kraken XBTEUR Spot erfolgreich abgerufen: €58,660.00
+2026-11-15 17:19:24,845 [INFO] CryptoCollector: Markdown-Report erfolgreich geschrieben: crypto_report_2026-11-15_17-19-24.md
+2026-11-15 17:19:24,845 [INFO] CryptoCollector: === Zyklus erfolgreich beendet ===
