@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 collector.py - Modulärer Crypto Market Data Collector für Termux
-Erfasst Spot-, Derivate- und On-Chain-Daten, berechnet Indikatoren
-und generiert den aktuellen Markdown-Marktbericht.
+Erfasst Spot-, Derivate- und On-Chain-Daten, berechnet Indikatoren,
+generiert den Markdown-Marktbericht und triggert den Git-Sync.
 """
 
-datetime_module = __import__('datetime')
 from datetime import datetime
 from pathlib import Path
 import subprocess
@@ -77,22 +76,19 @@ def get_mempool_onchain_data():
 
 
 def get_coinbase_data():
-  """Holt Coinbase Spot-Daten, Orderbuch und berechnet Indikatoren"""
+  """Holt Coinbase Spot-Daten, Orderbuch und Indikatoren"""
   try:
-    # Spot Ticker
     ticker = requests.get(
         "https://api.coinbase.com/v2/prices/BTC-EUR/spot", timeout=5
     ).json()
     price = float(ticker["data"]["amount"])
 
-    # Orderbuch (±1%)
     book = requests.get(
         "https://api.pro.coinbase.com/products/BTC-EUR/book?level=2", timeout=5
     ).json()
     bids = sum(float(item[1]) for item in book.get("bids", [])[:10])
     asks = sum(float(item[1]) for item in book.get("asks", [])[:10])
 
-    # Beispielhafte Platzhalter für Candles/Indikatoren (hier deine echten Berechnungen einbinden)
     return {
         "exchange": "Coinbase",
         "price": price,
@@ -192,11 +188,27 @@ def generate_report():
 *Generiert via modularer `collector.py` auf Android/Termux.*
 """
 
+  # Report lokal speichern
   report_path = REPORTS_DIR / "latest_report.md"
   report_path.write_text(report, encoding="utf-8")
   print(f"[+] Report erfolgreich gespeichert unter: {report_path}")
 
+  # Automatischen Git-Sync triggern
+  try:
+    git_sync_path = BASE_DIR / "git_sync.py"
+    if git_sync_path.exists():
+      print("[*] Starte automatischen Git Sync...")
+      subprocess.run(["python3", str(git_sync_path)], check=True)
+      print("[+] Git Sync erfolgreich abgeschlossen.")
+    else:
+      print(
+          "[!] git_sync.py nicht im Basis-Verzeichnis gefunden – Sync"
+          " übersprungen."
+      )
+  except Exception as e:
+    print(f"[!] Fehler beim Ausführen von git_sync.py: {e}")
+
 
 if __name__ == "__main__":
   generate_report()
-    
+  
