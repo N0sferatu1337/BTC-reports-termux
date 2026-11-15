@@ -111,4 +111,26 @@ def fetch_kraken_depth(current_price, pct=0.01):
     except Exception as e:
         print(f"Fehler Kraken Orderbook: {e}")
     return {"bid_depth": 0.0, "ask_depth": 0.0}
+
+def fetch_binance_derivatives():
+    """Ruft Open Interest und Funding Rate von der Binance Futures API ab."""
+    try:
+        oi_url = "https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT"
+        premium_url = "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT"
+        
+        oi_resp = requests.get(oi_url, timeout=10).json()
+        prem_resp = requests.get(premium_url, timeout=10).json()
+        
+        open_interest = float(oi_resp.get("openInterest", 0))
+        funding_rate = float(prem_resp.get("lastFundingRate", 0)) * 100  # In Prozent
+        mark_price = float(prem_resp.get("markPrice", 0))
+        
+        return {
+            "open_interest": open_interest,
+            "funding_rate": round(funding_rate, 4),
+            "mark_price": mark_price
+        }
+    except Exception as e:
+        print(f"Fehler bei Binance Futures Derivate-Daten: {e}")
+    return {"open_interest": 0.0, "funding_rate": 0.0, "mark_price": 0.0}
     
