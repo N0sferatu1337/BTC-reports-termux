@@ -6,7 +6,8 @@ from datetime import datetime
 from config import REPORTS_DIR, CB_PAIR, CB_CANDLE_GRANULARITIES, KR_PAIR, KR_INTERVALS
 from indicators import (
     calculate_ema, calculate_rsi, calculate_bollinger_bands,
-    fetch_fear_and_greed, fetch_coinbase_depth, fetch_kraken_depth
+    fetch_fear_and_greed, fetch_coinbase_depth, fetch_kraken_depth,
+    fetch_binance_derivatives
 )
 
 def fetch_coinbase_data():
@@ -52,13 +53,9 @@ def fetch_coinbase_data():
         orderbook_pressure = "🟢 Käufer" if depth["bid_depth"] > depth["ask_depth"] else "🔴 Verkäufer"
         
         return {
-            "spot": spot,
-            "volume": volume,
-            "spread": spread,
-            "orderbook": orderbook_pressure,
-            "depth": depth,
-            "timeframes": timeframes_data,
-            "status": "🟢 Online"
+            "spot": spot, "volume": volume, "spread": spread,
+            "orderbook": orderbook_pressure, "depth": depth,
+            "timeframes": timeframes_data, "status": "🟢 Online"
         }
     except Exception as e:
         print(f"Fehler Coinbase Data: {e}")
@@ -100,25 +97,17 @@ def fetch_kraken_data():
             rsi_text = f"{rsi:.1f} ({'❄️ Überverkauft' if rsi < 30 else ('🔥 Überkauft' if rsi > 70 else '⚖️ Neutral')})"
             
             timeframes_data[tf] = {
-                "rsi": rsi_text,
-                "ema9": ema9,
-                "ema21": ema21,
-                "upper_bb": upper_bb,
-                "lower_bb": lower_bb,
-                "trend": trend
+                "rsi": rsi_text, "ema9": ema9, "ema21": ema21,
+                "upper_bb": upper_bb, "lower_bb": lower_bb, "trend": trend
             }
             
         depth = fetch_kraken_depth(spot)
         orderbook_pressure = "🟢 Käufer" if depth["bid_depth"] > depth["ask_depth"] else "🔴 Verkäufer"
         
         return {
-            "spot": spot,
-            "volume": volume,
-            "spread": spread,
-            "orderbook": orderbook_pressure,
-            "depth": depth,
-            "timeframes": timeframes_data,
-            "status": "🟢 Online"
+            "spot": spot, "volume": volume, "spread": spread,
+            "orderbook": orderbook_pressure, "depth": depth,
+            "timeframes": timeframes_data, "status": "🟢 Online"
         }
     except Exception as e:
         print(f"Fehler Kraken Data: {e}")
@@ -129,14 +118,17 @@ def main():
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     filename_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     
-    print(f"[{timestamp}] Starte Datenerhebung...")
+    print(f"[{timestamp}] Starte erweiterte Datenerhebung...")
     cb = fetch_coinbase_data()
     kr = fetch_kraken_data()
     fng = fetch_fear_and_greed()
+    derivatives = fetch_binance_derivatives()
     
     if not cb or not kr:
         print("Fehler: Konnte nicht alle Börsendaten abrufen.")
         return
+
+    fr_signal = "🟢 Neutral/Leicht" if -0.01 <= derivatives['funding_rate'] <= 0.01 else ("🔥 Longs überhitzt" if derivatives['funding_rate'] > 0.01 else "❄️ Shorts überhitzt")
 
     report = f"""# Crypto Market Report ({timestamp})
 
@@ -147,11 +139,13 @@ def main():
 | **Coinbase** | **€{cb['spot']:,.2f}** | {cb['volume']:.2f} BTC | €{cb['spread']:.2f} | {cb['orderbook']} | €{cb['timeframes']['1h']['upper_bb']:,.0f} / €{cb['timeframes']['1h']['lower_bb']:,.0f} | {cb['status']} |
 | **Kraken** | **€{kr['spot']:,.2f}** | {kr['volume']:.2f} BTC | €{kr['spread']:.2f} | {kr['orderbook']} | €{kr['timeframes']['1h']['upper_bb']:,.0f} / €{kr['timeframes']['1h']['lower_bb']:,.0f} | {kr['status']} |
 
-## ⚡ Markt-Sentiment & Orderbuch-Tiefe (±1%)
+## ⚡ Derivate, Sentiment & Orderbuch-Tiefe (±1%)
 
 | Metrik | Wert | Details / Interpretation |
 | :--- | :--- | :--- |
 | **Fear & Greed Index** | **{fng['value']} / 100** | {fng['classification']} |
+| **Binance Open Interest** | **{derivatives['open_interest']:,.2f} BTC** | Globales Hebelvolumen |
+| **Binance Funding Rate** | **{derivatives['funding_rate']:+.4f}%** | {fr_signal} |
 | **Coinbase Tiefe (±1%)** | Bids: {cb['depth']['bid_depth']} BTC <br> Asks: {cb['depth']['ask_depth']} BTC | {'🟢 Kaufüberhang' if cb['depth']['bid_depth'] > cb['depth']['ask_depth'] else '🔴 Verkaufsdruck'} |
 | **Kraken Tiefe (±1%)** | Bids: {kr['depth']['bid_depth']} BTC <br> Asks: {kr['depth']['ask_depth']} BTC | {'🟢 Kaufüberhang' if kr['depth']['bid_depth'] > kr['depth']['ask_depth'] else '🔴 Verkaufsdruck'} |
 
