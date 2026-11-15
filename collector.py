@@ -7,7 +7,7 @@ from config import REPORTS_DIR, CB_PAIR, CB_CANDLE_GRANULARITIES, KR_PAIR, KR_IN
 from indicators import (
     calculate_ema, calculate_rsi, calculate_bollinger_bands,
     fetch_fear_and_greed, fetch_coinbase_depth, fetch_kraken_depth,
-    fetch_binance_derivatives
+    fetch_kraken_derivatives
 )
 
 def fetch_coinbase_data():
@@ -118,11 +118,11 @@ def main():
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     filename_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     
-    print(f"[{timestamp}] Starte erweiterte Datenerhebung...")
+    print(f"[{timestamp}] Starte vollständige Datenerhebung...")
     cb = fetch_coinbase_data()
     kr = fetch_kraken_data()
     fng = fetch_fear_and_greed()
-    derivatives = fetch_binance_derivatives()
+    derivatives = fetch_kraken_derivatives()
     
     if not cb or not kr:
         print("Fehler: Konnte nicht alle Börsendaten abrufen.")
@@ -144,8 +144,8 @@ def main():
 | Metrik | Wert | Details / Interpretation |
 | :--- | :--- | :--- |
 | **Fear & Greed Index** | **{fng['value']} / 100** | {fng['classification']} |
-| **Binance Open Interest** | **{derivatives['open_interest']:,.2f} BTC** | Globales Hebelvolumen |
-| **Binance Funding Rate** | **{derivatives['funding_rate']:+.4f}%** | {fr_signal} |
+| **Kraken Futures Open Interest** | **{derivatives['open_interest']:,.2f} BTC** | Globales Hebelvolumen |
+| **Kraken Futures Funding Rate** | **{derivatives['funding_rate']:+.4f}%** | {fr_signal} |
 | **Coinbase Tiefe (±1%)** | Bids: {cb['depth']['bid_depth']} BTC <br> Asks: {cb['depth']['ask_depth']} BTC | {'🟢 Kaufüberhang' if cb['depth']['bid_depth'] > cb['depth']['ask_depth'] else '🔴 Verkaufsdruck'} |
 | **Kraken Tiefe (±1%)** | Bids: {kr['depth']['bid_depth']} BTC <br> Asks: {kr['depth']['ask_depth']} BTC | {'🟢 Kaufüberhang' if kr['depth']['bid_depth'] > kr['depth']['ask_depth'] else '🔴 Verkaufsdruck'} |
 
@@ -188,4 +188,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+            
