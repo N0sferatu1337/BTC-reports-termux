@@ -1,60 +1,89 @@
-import os
-import subprocess
-from pathlib import Path
-from datetime import datetime
+#!/usr/bin/env python3
+"""
+git_sync.py - veröffentlicht Marktberichte im Branch "reports".
 
-def sync_repository(repo_path: str = "~/crypto-bot", commit_message: str = None) -> bool:
-    """
-    Universeller GitOps-Automator: Staged, committet, rebaset und pusht ALLE 
-    Änderungen im angegebenen Repository-Pfad, unabhängig vom Erzeuger.
-    """
-    target_repo = Path(repo_path).expanduser().resolve()
-    
-    if not (target_repo / ".git").exists():
-        print(f"[GitOps Fehler] {target_repo} ist kein gültiges Git-Repository!")
+Der Branch "main" wird nicht automatisch verändert (Code bleibt manuell versioniert).
+Die Berichte liegen in einem Git-Worktree, der auf dem Branch "reports" ausgecheckt ist.
+Dadurch bleibt dein Arbeitsstand auf "main" unberührt.
+"""
+
+import logging
+import subprocess
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+log = logging.getLogger("git_sync")
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+
+
+def _remote_branch_exists(repo: Path, remote: str, branch: str) -> bool:
+    _git(repo, "fetch", remote, branch)  # Fehler ignorieren: Branch existiert evtl. noch nicht
+    return _git(repo, "rev-parse", "--verify", "-q", f"{remote}/{branch}").returncode == 0
+
+
+def ensure_reports_worktree(
+    repo: Path, worktree: Path, branch: str = "reports", remote: str = "origin"
+) -> bool:
+    """Legt den Worktree für den Reports-Branch an, falls er noch nicht existiert."""
+    worktree = Path(worktree)
+    if (worktree / ".git").exists():
+        return True
+    if worktree.exists() and any(worktree.iterdir()):
+        log.error("%s existiert, ist aber kein Worktree. Bitte Ordner prüfen.", worktree)
         return False
 
-    os.chdir(target_repo)
-    
-    # Automatischen Commit-Messsage generieren, falls keine übergeben wurde
-    if not commit_message:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        commit_message = f"chore(auto-sync): update workspace at {timestamp}"
+    if _remote_branch_exists(repo, remote, branch):
+        res = _git(repo, "worktree", "add", "-B", branch, str(worktree), f"{remote}/{branch}")
+    else:
+        # Neuer, leerer Branch ohne Vorgeschichte (benötigt Git >= 2.42)
+        res = _git(repo, "worktree", "add", "--orphan", "-b", branch, str(worktree))
 
-    try:
-        # 1. Prüfen, ob überhaupt ungespeicherte Änderungen existieren
-        status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, check=True)
-        if not status.stdout.strip():
-            print("[GitOps] Keine Änderungen im Repository gefunden. Überspringe Sync.")
-            return True
+    if res.returncode != 0:
+        log.error("Worktree für Branch %s konnte nicht angelegt werden: %s", branch, res.stderr.strip())
+        return False
+    log.info("Reports-Worktree bereit: %s", worktree)
+    return True
 
-        # 2. Alle Änderungen (Code, Markdown, Daten) ins Staging übernehmen
-        subprocess.run(["git", "add", "."], check=True)
 
-        # 3. Lokalen Commit erstellen
-        subprocess.run(["git", "commit", "-m", commit_message], check=True)
+def sync_reports(
+    worktree: Path,
+    reports_subdir: str = "reports",
+    remote: str = "origin",
+    branch: str = "reports",
+    timestamp: Optional[datetime] = None,
+) -> bool:
+    """Committet neue Berichtsdateien im Worktree und veröffentlicht den Branch."""
+    worktree = Path(worktree)
+    stamp = (timestamp or datetime.now()).strftime("%Y-%m-%d %H:%M")
 
-        # 4. Remote-Änderungen holen (mit Rebase, um Merge-Konflikte zu vermeiden)
-        print("[GitOps] Hole Remote-Änderungen (rebase)...")
-        pull_result = subprocess.run(["git", "pull", "--rebase", "origin", "main"], capture_output=True, text=True)
-        
-        if pull_result.returncode != 0:
-            print(f"[GitOps Konflikt-Warnung]:\n{pull_result.stderr}")
-            subprocess.run(["git", "rebase", "--abort"])
+    if _git(worktree, "status", "--porcelain", "--", reports_subdir).stdout.strip():
+        for step in (
+            ("add", "--", reports_subdir),
+            ("commit", "-m", f"chore(report): Marktbericht {stamp}"),
+        ):
+            res = _git(worktree, *step)
+            if res.returncode != 0:
+                log.error("Schritt %s fehlgeschlagen: %s", step[0], (res.stderr or res.stdout).strip())
+                return False
+        log.info("Commit für Bericht %s erstellt.", stamp)
+    else:
+        log.info("Keine neuen Berichte. Prüfe auf ausstehende Commits.")
+
+    if _remote_branch_exists(worktree, remote, branch):
+        sync = _git(worktree, "pull", "--rebase", remote, branch)
+        if sync.returncode != 0:
+            log.error("Rebase mit %s/%s fehlgeschlagen: %s", remote, branch, sync.stderr.strip())
+            _git(worktree, "rebase", "--abort")
             return False
 
-        # 5. Zu GitHub pushen
-        print("[GitOps] Pushe Änderungen zu GitHub...")
-        subprocess.run(["git", "push", "origin", "main"], capture_output=True, text=True, check=True)
-        
-        print("[GitOps] Erfolgreich zu GitHub synchronisiert!")
-        return True
-
-    except subprocess.CalledProcessError as e:
-        print(f"[GitOps Fehler] Befehl fehlgeschlagen: {e.cmd}\n{e.stderr}")
+    push = _git(worktree, "push", "-u", remote, branch)
+    if push.returncode != 0:
+        log.error("Veröffentlichung fehlgeschlagen: %s", push.stderr.strip())
         return False
 
-if __name__ == "__main__":
-    # Test-Aufruf direkt aus der Shell
-    sync_repository()
-
+    log.info("Bericht nach %s/%s veröffentlicht.", remote, branch)
+    return True
