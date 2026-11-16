@@ -1,0 +1,10 @@
+# Python-Laufzeitdateien
+__pycache__/
+*.pyc
+
+# Laufprotokolle des Daemons
+*.log
+
+# Lokale Report-Kopien und Worktree des Branches "reports"
+reports/
+reports-worktree/
