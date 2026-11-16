@@ -8,3 +8,4 @@ __pycache__/
 # Lokale Report-Kopien und Worktree des Branches "reports"
 reports/
 reports-worktree/
+data/
