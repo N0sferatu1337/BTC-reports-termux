@@ -1,38 +1,38 @@
-# Crypto Market Report (2026-11-16 01:01:00)
+# Crypto Market Report (2026-11-16 01:21:07)
 
 ## 📊 Marktübersicht, Volumen & Orderbuch-Tiefe
 
 | Exchange | Spot (EUR) | 24h Volumen | Spread | Orderbuch Druck | Bollinger Bänder (U/L) | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Coinbase** | **€59,232.28** | 667.73 BTC | €11.69 | 🔴 Verkäufer | €59,811 / €58,296 | 🟢 Online |
-| **Kraken** | **€59,257.80** | 982.21 BTC | €6.2 | 🟢 Käufer | €59,834 / €58,317 | 🟢 Online |
+| **Coinbase** | **€58,982.79** | 648.24 BTC | €11.69 | 🟢 Käufer | €59,815 / €58,289 | 🟢 Online |
+| **Kraken** | **€58,964.10** | 980.45 BTC | €6.2 | 🟢 Käufer | €59,816 / €58,305 | 🟢 Online |
 
 ## ⚡ Derivate, Sentiment & On-Chain Metriken
 
 | Metrik | Wert | Details / Interpretation |
 | :--- | :--- | :--- |
 | **Fear & Greed Index** | **10 / 100** | Extreme Fear |
-| **Binance Futures OI** | **93,511.78 BTC** | Globales Hebelvolumen (USDS-M) |
-| **Binance Funding Rate** | **-0.0013%** | 🟢 Neutral / Ausgeglichen |
-| **Mempool Unconfirmed TXs** | **75,443** | Auslastung des Bitcoin-Netzwerks |
-| **Mempool Größe** | **31.95 MB** | Speicherauslastung im RAM |
-| **Empfohlene Gebühr (Fast)** | **1 sat/vB** | On-Chain Aktivitätsdruck |
+| **Binance Futures OI** | **93,449.31 BTC** | Globales Hebelvolumen (USDS-M) |
+| **Binance Funding Rate** | **-0.0020%** | 🟢 Neutral / Ausgeglichen |
+| **Mempool Unconfirmed TXs** | **77,622** | Auslastung des Bitcoin-Netzwerks |
+| **Mempool Größe** | **32.41 MB** | Speicherauslastung im RAM |
+| **Empfohlene Gebühr (Fast)** | **2 sat/vB** | On-Chain Aktivitätsdruck |
 
 ## 📈 Multi-Timeframe Indikatoren-Analyse
 
 ### 🏛️ Coinbase
 | Timeframe | RSI (14) | EMA 9 | EMA 21 | Trend-Tendenz |
 | :--- | :--- | :--- | :--- | :--- |
-| **15m** | 54.8 (⚖️ Neutral) | €59,144.90 | €59,075.91 | 🟢 Bullisch |
-| **1h** | 49.7 (⚖️ Neutral) | €59,072.30 | €59,111.30 | 🔴 Bärisch |
-| **6h** | 29.2 (❄️ Überverkauft) | €59,986.84 | €62,089.14 | 🔴 Bärisch |
+| **15m** | 47.5 (⚖️ Neutral) | €59,107.89 | €59,071.51 | 🟢 Bullisch |
+| **1h** | 46.2 (⚖️ Neutral) | €59,059.24 | €59,102.63 | 🔴 Bärisch |
+| **6h** | 29.0 (❄️ Überverkauft) | €59,800.82 | €61,814.48 | 🔴 Bärisch |
 
 ### 🏛️ Kraken
 | Timeframe | RSI (14) | EMA 9 | EMA 21 | Trend-Tendenz |
 | :--- | :--- | :--- | :--- | :--- |
-| **15m** | 58.4 (⚖️ Neutral) | €59,175.13 | €59,097.27 | 🟢 Bullisch |
-| **1h** | 50.4 (⚖️ Neutral) | €59,123.79 | €59,135.53 | 🔴 Bärisch |
-| **4h** | 34.4 (⚖️ Neutral) | €59,398.68 | €60,802.78 | 🔴 Bärisch |
+| **15m** | 46.0 (⚖️ Neutral) | €59,092.12 | €59,064.20 | 🟢 Bullisch |
+| **1h** | 46.3 (⚖️ Neutral) | €59,063.27 | €59,108.02 | 🔴 Bärisch |
+| **4h** | 33.1 (⚖️ Neutral) | €59,338.16 | €60,775.27 | 🔴 Bärisch |
 
 ---
 *Generiert via modularer `collector.py` auf Android/Termux.*
