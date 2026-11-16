@@ -1,368 +1,402 @@
 #!/usr/bin/env python3
 """
-collector.py - Modulärer Crypto Market Data Collector für Termux
-Erfasst Spot, Orderbuch-Tiefe, Binance Futures, Mempool On-Chain,
-Multi-Timeframe Candles & Indikatoren (RSI, EMA, Bollinger),
-generiert den Markdown-Marktbericht und triggert den Git-Sync.
+collector.py - BTC/EUR Marktdaten-Collector für Termux.
+
+Ablauf: Daten abrufen -> Indikatoren berechnen -> Markdown-Report schreiben -> Git-Sync.
+
+Nicht verfügbare Werte werden als "n/a" ausgewiesen. Es gibt keine Ersatz- oder
+Fallback-Zahlen. Jede fehlgeschlagene Quelle landet im Report unter "Datenlücken".
 """
 
+import logging
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
-import subprocess
+from typing import Any, Dict, List, Optional
+
 import requests
 
-# Arbeitsverzeichnis (~/crypto-bot)
-BASE_DIR = Path(__file__).resolve().parent
-REPORTS_DIR = BASE_DIR / "reports"
-REPORTS_DIR.mkdir(exist_ok=True)
+import config
+import git_sync
+from indicators import (
+    bollinger,
+    depth_within_band,
+    funding_label,
+    orderbook_pressure,
+    spread,
+    timeframe_stats,
+)
+
+log = logging.getLogger("collector")
+HEADERS = {"User-Agent": config.USER_AGENT}
+
+
+class SourceError(Exception):
+    """Ein Datenabruf ist fehlgeschlagen oder lieferte unbrauchbare Daten."""
+
+
+# Fehler, die bei einzelnen Quellen abgefangen werden
+SOURCE_ERRORS = (SourceError, KeyError, IndexError, TypeError, ValueError)
 
 
 # ==========================================
-# 1. HILFSFUNKTIONEN FÜR TECHNISCHE INDIKATOREN
+# 1. HTTP-Hilfsfunktionen
 # ==========================================
 
-
-def calculate_ema(prices, period):
-  if not prices or len(prices) < period:
-    return prices[-1] if prices else 0.0
-  multiplier = 2 / (period + 1)
-  ema = sum(prices[:period]) / period
-  for price in prices[period:]:
-    ema = (price - ema) * multiplier + ema
-  return ema
+def get_json(url: str, params: Optional[dict] = None) -> Any:
+    try:
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=config.HTTP_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise SourceError(f"{url} -> {exc}") from exc
 
 
-def calculate_rsi(prices, period=14):
-  if not prices or len(prices) < period + 1:
-    return 50.0, "⚖️ Neutral"
-  gains, losses = [], []
-  for i in range(1, len(prices)):
-    change = prices[i] - prices[i - 1]
-    gains.append(max(0, change))
-    losses.append(max(0, -change))
-
-  avg_gain = sum(gains[:period]) / period
-  avg_loss = sum(losses[:period]) / period
-
-  if avg_loss == 0:
-    return 100.0, "🔥 Überkauft"
-
-  for i in range(period, len(gains)):
-    avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-    avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-
-  if avg_loss == 0:
-    return 100.0, "🔥 Überkauft"
-
-  rs = avg_gain / avg_loss
-  rsi = 100 - (100 / (1 + rs))
-
-  # Trend-Bewertung
-  if rsi > 70:
-    status = "🔥 Überkauft"
-  elif rsi < 30:
-    status = "❄️ Überverkauft"
-  else:
-    status = "⚖️ Neutral"
-
-  return round(rsi, 1), status
+def check_kraken(res: dict) -> dict:
+    if res.get("error"):
+        raise SourceError(f"Kraken: {res['error']}")
+    return res["result"]
 
 
-def calculate_bollinger_bands(prices, period=20, num_std=2):
-  if not prices or len(prices) < period:
-    p = prices[-1] if prices else 0.0
-    return p * 1.025, p * 0.975
-  sub = prices[-period:]
-  sma = sum(sub) / period
-  variance = sum((x - sma) ** 2 for x in sub) / period
-  std_dev = variance**0.5
-  return round(sma + (num_std * std_dev), 2), round(
-      sma - (num_std * std_dev), 2
-  )
+def kraken_pair_key(result: dict) -> str:
+    keys = [k for k in result if k != "last"]
+    if not keys:
+        raise SourceError("Kraken: kein Paar im Ergebnis")
+    return keys[0]
 
 
-# ==========================================
-# 2. DATENABRUF (APIs & ON-CHAIN)
-# ==========================================
-
-
-def get_fear_and_greed():
-  try:
-    url = "https://api.alternative.me/fng/?limit=1"
-    res = requests.get(url, timeout=5).json()
-    data = res["data"][0]
-    return int(data["value"]), data["value_classification"]
-  except Exception as e:
-    print(f"[!] Fehler beim Fear & Greed Index: {e}")
-    return 50, "Neutral"
-
-
-def get_binance_futures_data():
-  try:
-    oi_url = "https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT"
-    oi_res = requests.get(oi_url, timeout=5).json()
-    open_interest = float(oi_res.get("openInterest", 0))
-
-    funding_url = "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT"
-    f_res = requests.get(funding_url, timeout=5).json()
-    funding_rate = float(f_res.get("lastFundingRate", 0)) * 100
-
-    return {"open_interest": open_interest, "funding_rate": funding_rate}
-  except Exception as e:
-    print(f"[!] Fehler bei Binance Futures Daten: {e}")
-    return {"open_interest": 0.0, "funding_rate": 0.0}
-
-
-def get_mempool_onchain_data():
-  try:
-    fees_url = "https://mempool.space/api/v1/fees/recommended"
-    fees_res = requests.get(fees_url, timeout=5).json()
-
-    mempool_url = "https://mempool.space/api/mempool"
-    mempool_res = requests.get(mempool_url, timeout=5).json()
-
+def empty_exchange(name: str, tf_labels: List[str]) -> Dict[str, Any]:
     return {
-        "fastest_fee": fees_res.get("fastestFee", 0),
-        "unconfirmed_txs": mempool_res.get("count", 0),
-        "mempool_size_mb": round(mempool_res.get("vsize", 0) / 1_000_000, 2),
-    }
-  except Exception as e:
-    print(f"[!] Fehler bei Mempool On-Chain Daten: {e}")
-    return {
-        "fastest_fee": 0,
-        "unconfirmed_txs": 0,
-        "mempool_size_mb": 0.0,
+        "name": name,
+        "price": None,
+        "vol_24h": None,
+        "spread": None,
+        "bid_depth": None,
+        "ask_depth": None,
+        "bb_upper": None,
+        "bb_lower": None,
+        "timeframes": {},
+        "tf_labels": tf_labels,
     }
 
 
-def fetch_coinbase_candles(granularity):
-  """Hole historische Kerzen von Coinbase Exchange (granularity in Sekunden: 900=15m, 3600=1h, 21600=6h)"""
-  try:
-    url = f"https://api.exchange.coinbase.com/products/BTC-EUR/candles?granularity={granularity}"
-    res = requests.get(
-        url, timeout=5, headers={"User-Agent": "CryptoBot/1.0"}
-    ).json()
-    if isinstance(res, list) and len(res) > 0:
-      # Coinbase format: [time, low, high, open, close, volume] -> sort chronologically (oldest to newest)
-      sorted_candles = sorted(res, key=lambda x: x[0])
-      closes = [float(c[4]) for c in sorted_candles]
-      volumes = [float(c[5]) for c in sorted_candles]
-      return closes, sum(volumes[-24:]) if len(volumes) >= 24 else sum(volumes)
-  except Exception as e:
-    print(f"[!] Coinbase Candles Fehler (granularity {granularity}): {e}")
-  return [], 0.0
-
-
-def fetch_kraken_candles(interval):
-  """Hole historische Kerzen von Kraken (interval in Minuten: 15, 60, 240)"""
-  try:
-    url = f"https://api.kraken.com/0/public/OHLC?pair=BTCEUR&interval={interval}"
-    res = requests.get(url, timeout=5).json()
-    result = res.get("result", {})
-    pair_key = [k for k in result.keys() if k != "last"][0]
-    raw_candles = result[pair_key]
-    if raw_candles:
-      closes = [float(c[4]) for c in raw_candles]
-      volumes = [float(c[6]) for c in raw_candles]
-      return closes, sum(volumes[-24:]) if len(volumes) >= 24 else sum(volumes)
-  except Exception as e:
-    print(f"[!] Kraken Candles Fehler (interval {interval}): {e}")
-  return [], 0.0
-
-
-def get_coinbase_data():
-  try:
-    ticker = requests.get(
-        "https://api.coinbase.com/v2/prices/BTC-EUR/spot", timeout=5
-    ).json()
-    price = float(ticker["data"]["amount"])
-
-    book = requests.get(
-        "https://api.exchange.coinbase.com/products/BTC-EUR/book?level=2",
-        timeout=5,
-    ).json()
-    bids = sum(float(item[1]) for item in book.get("bids", [])[:10])
-    asks = sum(float(item[1]) for item in book.get("asks", [])[:10])
-
-    # Multi-Timeframe Candles abrufen (15m, 1h, 6h)
-    closes_15m, vol_15m = fetch_coinbase_candles(900)
-    closes_1h, vol_1h = fetch_coinbase_candles(3600)
-    closes_6h, vol_6h = fetch_coinbase_candles(21600)
-
-    # Indikatoren berechnen
-    rsi_15m, rsi_15m_s = calculate_rsi(closes_15m)
-    rsi_1h, rsi_1h_s = calculate_rsi(closes_1h)
-    rsi_6h, rsi_6h_s = calculate_rsi(closes_6h)
-
-    ema9_15m = calculate_ema(closes_15m, 9)
-    ema21_15m = calculate_ema(closes_15m, 21)
-    ema9_1h = calculate_ema(closes_1h, 9)
-    ema21_1h = calculate_ema(closes_1h, 21)
-    ema9_6h = calculate_ema(closes_6h, 9)
-    ema21_6h = calculate_ema(closes_6h, 21)
-
-    bb_upper, bb_lower = calculate_bollinger_bands(closes_1h)
-
-    return {
-        "price": price,
-        "volume_24h": round(vol_1h, 2) if vol_1h > 0 else 851.98,
-        "spread": 11.69,
-        "bids": bids,
-        "asks": asks,
-        "bollinger_upper": bb_upper,
-        "bollinger_lower": bb_lower,
-        "rsi_15m": rsi_15m,
-        "rsi_15m_s": rsi_15m_s,
-        "rsi_1h": rsi_1h,
-        "rsi_1h_s": rsi_1h_s,
-        "rsi_6h": rsi_6h,
-        "rsi_6h_s": rsi_6h_s,
-        "ema9_15m": ema9_15m,
-        "ema21_15m": ema21_15m,
-        "ema9_1h": ema9_1h,
-        "ema21_1h": ema21_1h,
-        "ema9_6h": ema9_6h,
-        "ema21_6h": ema21_6h,
-        "status": "Online",
-    }
-  except Exception as e:
-    print(f"[!] Fehler bei Coinbase Daten: {e}")
-    return None
-
-
-def get_kraken_data():
-  try:
-    ticker = requests.get(
-        "https://api.kraken.com/0/public/Ticker?pair=BTCEUR", timeout=5
-    ).json()
-    result = ticker["result"]["XXBTZEUR"]
-    price = float(result["c"][0])
-
-    # Multi-Timeframe Candles abrufen (15m, 1h, 4h)
-    closes_15m, vol_15m = fetch_kraken_candles(15)
-    closes_1h, vol_1h = fetch_kraken_candles(60)
-    closes_4h, vol_4h = fetch_kraken_candles(240)
-
-    # Indikatoren berechnen
-    rsi_15m, rsi_15m_s = calculate_rsi(closes_15m)
-    rsi_1h, rsi_1h_s = calculate_rsi(closes_1h)
-    rsi_4h, rsi_4h_s = calculate_rsi(closes_4h)
-
-    ema9_15m = calculate_ema(closes_15m, 9)
-    ema21_15m = calculate_ema(closes_15m, 21)
-    ema9_1h = calculate_ema(closes_1h, 9)
-    ema21_1h = calculate_ema(closes_1h, 21)
-    ema9_4h = calculate_ema(closes_4h, 9)
-    ema21_4h = calculate_ema(closes_4h, 21)
-
-    bb_upper, bb_lower = calculate_bollinger_bands(closes_1h)
-
-    return {
-        "price": price,
-        "volume_24h": round(float(result["v"][1]), 2),
-        "spread": 6.20,
-        "bids": 21.48,
-        "asks": 19.89,
-        "bollinger_upper": bb_upper,
-        "bollinger_lower": bb_lower,
-        "rsi_15m": rsi_15m,
-        "rsi_15m_s": rsi_15m_s,
-        "rsi_1h": rsi_1h,
-        "rsi_1h_s": rsi_1h_s,
-        "rsi_4h": rsi_4h,
-        "rsi_4h_s": rsi_4h_s,
-        "ema9_15m": ema9_15m,
-        "ema21_15m": ema21_15m,
-        "ema9_1h": ema9_1h,
-        "ema21_1h": ema21_1h,
-        "ema9_4h": ema9_4h,
-        "ema21_4h": ema21_4h,
-        "status": "Online",
-    }
-  except Exception as e:
-    print(f"[!] Fehler bei Kraken Daten: {e}")
-    return None
+def apply_bollinger(ex: Dict[str, Any], closes: List[float]) -> None:
+    bb = bollinger(closes)
+    if bb:
+        ex["bb_upper"], _, ex["bb_lower"] = bb
 
 
 # ==========================================
-# 3. REPORT GENERIERUNG & GIT SYNC
+# 2. Coinbase
 # ==========================================
 
+def coinbase_candles(granularity: int, now_ts: float) -> List[list]:
+    """Abgeschlossene Kerzen, älteste zuerst. Format: [time, low, high, open, close, volume]."""
+    data = get_json(
+        f"https://api.exchange.coinbase.com/products/{config.CB_PAIR}/candles",
+        params={"granularity": granularity},
+    )
+    if not isinstance(data, list) or not data:
+        raise SourceError(f"Coinbase Kerzen (granularity {granularity}): keine Daten")
+    candles = sorted(data, key=lambda c: c[0])
+    # Die letzte Kerze ist meist noch nicht abgeschlossen und wird verworfen
+    return [c for c in candles if c[0] + granularity <= now_ts]
 
-def generate_report():
-  now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-  fng_val, fng_text = get_fear_and_greed()
-  binance_fut = get_binance_futures_data()
-  onchain = get_mempool_onchain_data()
+def fetch_coinbase(now_ts: float, errors: List[str]) -> Dict[str, Any]:
+    tf_labels = list(config.CB_CANDLE_GRANULARITIES)
+    ex = empty_exchange("Coinbase", tf_labels)
 
-  cb = get_coinbase_data()
-  kr = get_kraken_data()
+    try:
+        ex["price"] = float(get_json("https://api.coinbase.com/v2/prices/BTC-EUR/spot")["data"]["amount"])
+    except SOURCE_ERRORS as exc:
+        errors.append(f"Coinbase Spotpreis: {exc}")
 
-  if not cb or not kr:
-    print("[!] Kritischer Fehler: Konnte Börsendaten nicht abrufen.")
-    return
+    try:
+        book = get_json(
+            f"https://api.exchange.coinbase.com/products/{config.CB_PAIR}/book",
+            params={"level": config.CB_BOOK_LEVEL},
+        )
+        bids, asks = book["bids"], book["asks"]
+        ex["spread"] = spread(float(bids[0][0]), float(asks[0][0]))
+        ex["bid_depth"] = depth_within_band(bids, ex["price"], config.BOOK_BAND_PCT, "bid")
+        ex["ask_depth"] = depth_within_band(asks, ex["price"], config.BOOK_BAND_PCT, "ask")
+    except SOURCE_ERRORS as exc:
+        errors.append(f"Coinbase Orderbuch: {exc}")
 
-  report = f"""# Crypto Market Report ({now})
+    for label, granularity in config.CB_CANDLE_GRANULARITIES.items():
+        try:
+            candles = coinbase_candles(granularity, now_ts)
+            closes = [float(c[4]) for c in candles]
+            ex["timeframes"][label] = timeframe_stats(closes)
+            if label == config.BB_TIMEFRAME:
+                apply_bollinger(ex, closes)
+                if len(candles) >= 24:
+                    ex["vol_24h"] = sum(float(c[5]) for c in candles[-24:])
+        except SOURCE_ERRORS as exc:
+            errors.append(f"Coinbase Kerzen {label}: {exc}")
 
-## 📊 Marktübersicht, Volumen & Orderbuch-Tiefe
+    return ex
 
-| Exchange | Spot (EUR) | 24h Volumen | Spread | Orderbuch Druck | Bollinger Bänder (U/L) | Status |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Coinbase** | **€{cb['price']:,.2f}** | {cb['volume_24h']} BTC | €{cb['spread']} | {"🔴 Verkäufer" if cb['asks'] > cb['bids'] else "🟢 Käufer"} | €{cb['bollinger_upper']:,.0f} / €{cb['bollinger_lower']:,.0f} | {"🟢 " + cb['status']} |
-| **Kraken** | **€{kr['price']:,.2f}** | {kr['volume_24h']} BTC | €{kr['spread']} | {"🔴 Verkäufer" if kr['asks'] > kr['bids'] else "🟢 Käufer"} | €{kr['bollinger_upper']:,.0f} / €{kr['bollinger_lower']:,.0f} | {"🟢 " + kr['status']} |
 
-## ⚡ Derivate, Sentiment & On-Chain Metriken
+# ==========================================
+# 3. Kraken
+# ==========================================
 
-| Metrik | Wert | Details / Interpretation |
-| :--- | :--- | :--- |
-| **Fear & Greed Index** | **{fng_val} / 100** | {fng_text} |
-| **Binance Futures OI** | **{binance_fut['open_interest']:,.2f} BTC** | Globales Hebelvolumen (USDS-M) |
-| **Binance Funding Rate** | **{binance_fut['funding_rate']:.4f}%** | {"🔴 Longs überhebelt" if binance_fut['funding_rate'] > 0.01 else "🟢 Neutral / Ausgeglichen"} |
-| **Mempool Unconfirmed TXs** | **{onchain['unconfirmed_txs']:,}** | Auslastung des Bitcoin-Netzwerks |
-| **Mempool Größe** | **{onchain['mempool_size_mb']} MB** | Speicherauslastung im RAM |
-| **Empfohlene Gebühr (Fast)** | **{onchain['fastest_fee']} sat/vB** | On-Chain Aktivitätsdruck |
+def fetch_kraken(now_ts: float, errors: List[str]) -> Dict[str, Any]:
+    tf_labels = list(config.KR_INTERVALS)
+    ex = empty_exchange("Kraken", tf_labels)
 
-## 📈 Multi-Timeframe Indikatoren-Analyse
+    try:
+        result = check_kraken(get_json(
+            "https://api.kraken.com/0/public/Ticker", params={"pair": config.KR_PAIR}
+        ))
+        ticker = result[kraken_pair_key(result)]
+        ex["price"] = float(ticker["c"][0])
+        ex["vol_24h"] = float(ticker["v"][1])
+        ex["spread"] = spread(float(ticker["b"][0]), float(ticker["a"][0]))
+    except SOURCE_ERRORS as exc:
+        errors.append(f"Kraken Ticker: {exc}")
 
-### 🏛️ Coinbase
-| Timeframe | RSI (14) | EMA 9 | EMA 21 | Trend-Tendenz |
-| :--- | :--- | :--- | :--- | :--- |
-| **15m** | {cb['rsi_15m']} ({cb['rsi_15m_s']}) | €{cb['ema9_15m']:,.2f} | €{cb['ema21_15m']:,.2f} | {"🔴 Bärisch" if cb['ema9_15m'] < cb['ema21_15m'] else "🟢 Bullisch"} |
-| **1h** | {cb['rsi_1h']} ({cb['rsi_1h_s']}) | €{cb['ema9_1h']:,.2f} | €{cb['ema21_1h']:,.2f} | {"🔴 Bärisch" if cb['ema9_1h'] < cb['ema21_1h'] else "🟢 Bullisch"} |
-| **6h** | {cb['rsi_6h']} ({cb['rsi_6h_s']}) | €{cb['ema9_6h']:,.2f} | €{cb['ema21_6h']:,.2f} | {"🔴 Bärisch" if cb['ema9_6h'] < cb['ema21_6h'] else "🟢 Bullisch"} |
+    try:
+        result = check_kraken(get_json(
+            "https://api.kraken.com/0/public/Depth",
+            params={"pair": config.KR_PAIR, "count": config.KR_DEPTH_COUNT},
+        ))
+        book = result[kraken_pair_key(result)]
+        ex["bid_depth"] = depth_within_band(book["bids"], ex["price"], config.BOOK_BAND_PCT, "bid")
+        ex["ask_depth"] = depth_within_band(book["asks"], ex["price"], config.BOOK_BAND_PCT, "ask")
+    except SOURCE_ERRORS as exc:
+        errors.append(f"Kraken Orderbuch: {exc}")
 
-### 🏛️ Kraken
-| Timeframe | RSI (14) | EMA 9 | EMA 21 | Trend-Tendenz |
-| :--- | :--- | :--- | :--- | :--- |
-| **15m** | {kr['rsi_15m']} ({kr['rsi_15m_s']}) | €{kr['ema9_15m']:,.2f} | €{kr['ema21_15m']:,.2f} | {"🔴 Bärisch" if kr['ema9_15m'] < kr['ema21_15m'] else "🟢 Bullisch"} |
-| **1h** | {kr['rsi_1h']} ({kr['rsi_1h_s']}) | €{kr['ema9_1h']:,.2f} | €{kr['ema21_1h']:,.2f} | {"🔴 Bärisch" if kr['ema9_1h'] < kr['ema21_1h'] else "🟢 Bullisch"} |
-| **4h** | {kr['rsi_4h']} ({kr['rsi_4h_s']}) | €{kr['ema9_4h']:,.2f} | €{kr['ema21_4h']:,.2f} | {"🔴 Bärisch" if kr['ema9_4h'] < kr['ema21_4h'] else "🟢 Bullisch"} |
+    for label, minutes in config.KR_INTERVALS.items():
+        try:
+            result = check_kraken(get_json(
+                "https://api.kraken.com/0/public/OHLC",
+                params={"pair": config.KR_PAIR, "interval": minutes},
+            ))
+            # Format: [time, open, high, low, close, vwap, volume, count]
+            candles = [c for c in result[kraken_pair_key(result)] if c[0] + minutes * 60 <= now_ts]
+            closes = [float(c[4]) for c in candles]
+            ex["timeframes"][label] = timeframe_stats(closes)
+            if label == config.BB_TIMEFRAME:
+                apply_bollinger(ex, closes)
+        except SOURCE_ERRORS as exc:
+            errors.append(f"Kraken Kerzen {label}: {exc}")
 
----
-*Generiert via modularer `collector.py` auf Android/Termux.*
-"""
+    return ex
 
-  report_path = REPORTS_DIR / "latest_report.md"
-  report_path.write_text(report, encoding="utf-8")
-  print(f"[+] Report erfolgreich gespeichert unter: {report_path}")
 
-  # Automatischen Git-Sync triggern
-  try:
-    git_sync_path = BASE_DIR / "git_sync.py"
-    if git_sync_path.exists():
-      print("[*] Starte automatischen Git Sync...")
-      subprocess.run(["python3", str(git_sync_path)], check=True)
-      print("[+] Git Sync erfolgreich abgeschlossen.")
-    else:
-      print(
-          "[!] git_sync.py nicht im Basis-Verzeichnis gefunden – Sync"
-          " übersprungen."
-      )
-  except Exception as e:
-    print(f"[!] Fehler beim Ausführen von git_sync.py: {e}")
+# ==========================================
+# 4. Derivate, On-Chain, Sentiment
+# ==========================================
+
+def fetch_binance(errors: List[str]) -> Dict[str, Optional[float]]:
+    out: Dict[str, Optional[float]] = {"open_interest": None, "funding_rate_pct": None}
+    try:
+        oi = get_json("https://fapi.binance.com/fapi/v1/openInterest", params={"symbol": config.BN_SYMBOL})
+        out["open_interest"] = float(oi["openInterest"])
+    except SOURCE_ERRORS as exc:
+        errors.append(f"Binance Open Interest: {exc}")
+    try:
+        fr = get_json("https://fapi.binance.com/fapi/v1/premiumIndex", params={"symbol": config.BN_SYMBOL})
+        out["funding_rate_pct"] = float(fr["lastFundingRate"]) * 100
+    except SOURCE_ERRORS as exc:
+        errors.append(f"Binance Funding Rate: {exc}")
+    return out
+
+
+def fetch_mempool(errors: List[str]) -> Dict[str, Optional[float]]:
+    out: Dict[str, Optional[float]] = {"fastest_fee": None, "unconfirmed_txs": None, "mempool_size_mb": None}
+    try:
+        fees = get_json("https://mempool.space/api/v1/fees/recommended")
+        out["fastest_fee"] = int(fees["fastestFee"])
+    except SOURCE_ERRORS as exc:
+        errors.append(f"mempool.space Gebühren: {exc}")
+    try:
+        mp = get_json("https://mempool.space/api/mempool")
+        out["unconfirmed_txs"] = int(mp["count"])
+        out["mempool_size_mb"] = round(float(mp["vsize"]) / 1_000_000, 2)
+    except SOURCE_ERRORS as exc:
+        errors.append(f"mempool.space Mempool: {exc}")
+    return out
+
+
+def fetch_fear_greed(errors: List[str]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"value": None, "classification": None}
+    try:
+        item = get_json("https://api.alternative.me/fng/", params={"limit": 1})["data"][0]
+        out["value"] = int(item["value"])
+        out["classification"] = item["value_classification"]
+    except SOURCE_ERRORS as exc:
+        errors.append(f"Fear & Greed Index: {exc}")
+    return out
+
+
+# ==========================================
+# 5. Snapshot und Report
+# ==========================================
+
+def collect_snapshot() -> Dict[str, Any]:
+    now_ts = time.time()
+    errors: List[str] = []
+    return {
+        "generated_at": datetime.now().astimezone(),
+        "errors": errors,
+        "exchanges": [fetch_coinbase(now_ts, errors), fetch_kraken(now_ts, errors)],
+        "binance": fetch_binance(errors),
+        "mempool": fetch_mempool(errors),
+        "fear_greed": fetch_fear_greed(errors),
+    }
+
+
+def fmt_num(value: Optional[float], decimals: int = 2, prefix: str = "", suffix: str = "") -> str:
+    """Deutsche Zahlenformatierung. None wird als n/a ausgegeben."""
+    if value is None:
+        return "n/a ⚠️"
+    text = f"{value:,.{decimals}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{prefix}{text}{suffix}"
+
+
+def pressure_text(ex: Dict[str, Any]) -> str:
+    labels = {"Verkäufer": "🔴 Verkäufer", "Käufer": "🟢 Käufer", "Ausgeglichen": "⚪ Ausgeglichen"}
+    pressure = orderbook_pressure(ex["bid_depth"], ex["ask_depth"])
+    return labels.get(pressure, "n/a ⚠️")
+
+
+def build_report(snap: Dict[str, Any]) -> str:
+    ts = snap["generated_at"].strftime("%Y-%m-%d %H:%M:%S %Z")
+    exchanges = snap["exchanges"]
+    binance = snap["binance"]
+    mempool = snap["mempool"]
+    fng = snap["fear_greed"]
+
+    lines: List[str] = [f"# Crypto Market Report ({ts})", ""]
+
+    if snap["errors"]:
+        lines += [
+            "> ⚠️ **Datenlücken:** Einige Quellen lieferten keine Daten. Betroffene Werte sind als `n/a` markiert.",
+            "",
+        ]
+        lines += [f"- {err}" for err in snap["errors"]]
+        lines.append("")
+
+    lines += [
+        "## 📊 Marktübersicht, Volumen & Orderbuch-Tiefe",
+        "",
+        "| Exchange | Spot (EUR) | 24h Volumen | Spread | Orderbuch ±1 % (Bids / Asks, BTC) | Druck | Bollinger O / U (1h) | Status |",
+        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
+    ]
+    for ex in exchanges:
+        status = "🟢 Online" if ex["price"] is not None else "🔴 Fehler"
+        lines.append(
+            f"| **{ex['name']}** "
+            f"| **{fmt_num(ex['price'], 2, prefix='€')}** "
+            f"| {fmt_num(ex['vol_24h'], 2, suffix=' BTC')} "
+            f"| {fmt_num(ex['spread'], 2, prefix='€')} "
+            f"| {fmt_num(ex['bid_depth'], 2)} / {fmt_num(ex['ask_depth'], 2)} "
+            f"| {pressure_text(ex)} "
+            f"| {fmt_num(ex['bb_upper'], 0, prefix='€')} / {fmt_num(ex['bb_lower'], 0, prefix='€')} "
+            f"| {status} |"
+        )
+
+    lines += [
+        "",
+        "## ⚡ Derivate, Sentiment & On-Chain Metriken",
+        "",
+        "| Metrik | Wert | Details / Interpretation |",
+        "| :--- | :--- | :--- |",
+        f"| **Fear & Greed Index** | **{fmt_num(fng['value'], 0)} / 100** | {fng['classification'] or 'n/a ⚠️'} |",
+        f"| **Binance Futures OI** | **{fmt_num(binance['open_interest'], 2, suffix=' BTC')}** | Hebelvolumen (USDT-M, BTCUSDT) |",
+        f"| **Binance Funding Rate** | **{fmt_num(binance['funding_rate_pct'], 4, suffix='%')}** "
+        f"| {funding_label(binance['funding_rate_pct'], config.FUNDING_THRESHOLD_PCT)} |",
+        f"| **Mempool Unconfirmed TXs** | **{fmt_num(mempool['unconfirmed_txs'], 0)}** | Auslastung des Bitcoin-Netzwerks |",
+        f"| **Mempool Größe** | **{fmt_num(mempool['mempool_size_mb'], 2, suffix=' MB')}** | Speicherauslastung der Mempool |",
+        f"| **Empfohlene Gebühr (Fast)** | **{fmt_num(mempool['fastest_fee'], 0, suffix=' sat/vB')}** | On-Chain-Aktivitätsdruck |",
+        "",
+        "## 📈 Multi-Timeframe Indikatoren-Analyse",
+        "",
+    ]
+
+    for ex in exchanges:
+        lines += [
+            f"### 🏛️ {ex['name']}",
+            "",
+            "| Timeframe | RSI (14) | EMA 9 | EMA 21 | Trend-Tendenz |",
+            "| :--- | :--- | :--- | :--- | :--- |",
+        ]
+        for label in ex["tf_labels"]:
+            tf = ex["timeframes"].get(label, {})
+            rsi_cell = f"{fmt_num(tf.get('rsi'), 1)} ({tf.get('rsi_status', 'n/a')})"
+            lines.append(
+                f"| **{label}** | {rsi_cell} "
+                f"| {fmt_num(tf.get('ema9'), 2, prefix='€')} "
+                f"| {fmt_num(tf.get('ema21'), 2, prefix='€')} "
+                f"| {tf.get('trend', 'n/a')} |"
+            )
+        lines.append("")
+
+    lines += [
+        "---",
+        "",
+        "*Generiert von `collector.py`. Quellen: Coinbase, Kraken, Binance Futures, mempool.space, "
+        "alternative.me. Keine Anlageberatung.*",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def write_report(text: str, generated_at: datetime) -> Path:
+    """Schreibt jeden Lauf in eine neue Datei mit Zeitstempel. Bestehende Berichte werden nie überschrieben."""
+    config.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = generated_at.strftime("%Y%m%d_%H%M%S")
+    path = config.REPORTS_DIR / f"report_{stamp}.md"
+    counter = 1
+    while path.exists():  # Sicherheitsnetz für mehrere Läufe in derselben Sekunde
+        path = config.REPORTS_DIR / f"report_{stamp}_{counter}.md"
+        counter += 1
+    with path.open("x", encoding="utf-8") as fh:  # "x": Fehler statt Überschreiben
+        fh.write(text)
+    log.info("Report gespeichert: %s", path)
+    return path
+
+
+def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        stream=sys.stdout,
+    )
+    snap = collect_snapshot()
+    for err in snap["errors"]:
+        log.warning("Datenlücke: %s", err)
+
+    if all(ex["price"] is None for ex in snap["exchanges"]):
+        log.error("Keine Börsenpreise verfügbar. Der bestehende Report bleibt unverändert.")
+        return 1
+
+    worktree_ok = True
+    if config.GIT_SYNC_ENABLED:
+        worktree_ok = git_sync.ensure_reports_worktree(
+            config.BASE_DIR, config.REPORTS_WORKTREE_DIR, config.REPORTS_BRANCH
+        )
+        if not worktree_ok:
+            log.error("Reports-Branch nicht bereit. Der Bericht wird nur lokal gespeichert.")
+
+    write_report(build_report(snap), snap["generated_at"])
+
+    if config.GIT_SYNC_ENABLED:
+        if not worktree_ok or not git_sync.sync_reports(
+            config.REPORTS_WORKTREE_DIR,
+            reports_subdir="reports",
+            branch=config.REPORTS_BRANCH,
+            timestamp=snap["generated_at"],
+        ):
+            log.error("Veröffentlichung fehlgeschlagen. Der Bericht bleibt lokal erhalten und wird beim nächsten Lauf erneut versucht.")
+            return 2
+    return 0
 
 
 if __name__ == "__main__":
-  generate_report()
-    
+    sys.exit(main())
